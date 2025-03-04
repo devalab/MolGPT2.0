@@ -1,1 +1,1 @@
-# MolGPT2.0
+# molgpt2.0
