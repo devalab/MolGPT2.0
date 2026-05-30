@@ -1,1 +1,1 @@
-### Preference Data will be given access to upon request
+## This folder contains datasets used for training and preference optimisation.
