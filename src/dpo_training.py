@@ -13,7 +13,7 @@ from tqdm.auto import tqdm
 from build_corpus import build_corpus
 from build_vocab import WordVocab
 from utils import split
-from train_models import CustomTargetDataset, PositionalEncodings, PropertyEncoder,set_up_causal_mask, MolGPT2, save_model, load_model, Sampler, sample_a_bunch, compute_metrics
+from train_models import CustomTargetDataset, PositionalEncodings, PropertyEncoder,set_up_causal_mask, MolGPT2, save_model, load_model, Sampler, sample_a_bunch, compute_metrics, load_dataset
 
 import torch
 from torch import nn
@@ -36,7 +36,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 print("Loaded libraries.")
 
-df = pd.read_csv('../data/lck_dockstring_data1.csv')
+# df = pd.read_csv('../data/lck_dockstring_data1.csv')
 
 parser = argparse.ArgumentParser(description='Train dpo model')
 parser.add_argument('--properties', nargs='+', required=True, help='Properties used to train the base model (e.g., --properties affinity logps qeds sas tpsas)')
@@ -53,11 +53,17 @@ parser.add_argument('--temp', type=float, default=1.0, help='Sampling temperatur
 parser.add_argument('--ipo', action='store_true', help='Whether to use IPO loss instead of DPO loss')
 parser.add_argument('--beta', type=float, default=0.11, help='Beta parameter for DPO loss')
 parser.add_argument('--base_model_dir', type=str, default=None, help='Directory to load base model from (if not specified, will look for model matching properties in `checkpoints` directory)')
+parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
 args = parser.parse_args()
 print("Model properties: ", args.properties)
 print("Preference properties: ", args.preference_properties)
 print("Base model dir: ", args.base_model_dir)
 print("Checkpoint dir: ", args.checkpoint_dir)
+
+SMI_MAX_SIZE = 300
+SMI_MIN_FREQ=1
+with open("../data/smiles_corpus.txt", "r") as f:
+    smiles_vocab = WordVocab(f, max_size=SMI_MAX_SIZE, min_freq=SMI_MIN_FREQ)
 
 config = {
     'batch_size' : args.batch_size,
@@ -77,28 +83,6 @@ if args.base_model_dir:
 else:
     config['base_model_dir'] = "encoder_decoder_" + "_".join(prop for prop in config['properties'])
 config['run_name'] = config['base_model_dir'] # to load base model
-
-affinity_scaler = MinMaxScaler()
-qed_scaler = MinMaxScaler()
-logp_scaler = MinMaxScaler()
-tpsas_scaler = MinMaxScaler()
-sas_scaler = MinMaxScaler()
-
-affinity_scaler.fit(df['affinity'].values.reshape(-1,1))
-qed_scaler.fit(df['qed'].values.reshape(-1,1))
-logp_scaler.fit(df['logp'].values.reshape(-1,1))
-tpsas_scaler.fit(df['tpsa'].values.reshape(-1,1))
-sas_scaler.fit(df['sas'].values.reshape(-1,1))
-
-with open('../data/train_df_with_sas.pkl', 'rb') as f:
-    train_df = pickle.load(f)
-with open('../data/test_df_with_sas.pkl', 'rb') as f:
-    test_df = pickle.load(f)
-
-SMI_MAX_SIZE = 300
-SMI_MIN_FREQ=1
-with open("../data/smiles_corpus.txt", "r") as f:
-    smiles_vocab = WordVocab(f, max_size=SMI_MAX_SIZE, min_freq=SMI_MIN_FREQ)
 
 class PreferenceDataset(Dataset):
     def __init__(self, preference_data, vocab, property_names):
@@ -228,7 +212,7 @@ def val_step(model, ref_model, data_loader,epoch):
         
     return np.mean(running_loss)
 
-def run(config,preference_dataset):
+def run(config,preference_dataset,train_df,test_df,smiles_vocab):
     PROPERTIES = config['properties'] 
     
     batch_size = config['batch_size']
@@ -318,6 +302,7 @@ if __name__ == "__main__":
     preference_file = "../data/PreferenceData_" + "_".join(config['preference_properties']) + ".pkl"
     with open(preference_file, 'rb') as f:
         preference_data = pickle.load(f)
+    train_df,test_df,affinity_scaler,qed_scaler,logp_scaler,tpsas_scaler,sas_scaler = load_dataset(args.seed)
     preference_dataset = PreferenceDataset(preference_data, smiles_vocab, property_names=config['preference_properties'])
 
-    run(config, preference_dataset)
+    run(config, preference_dataset, train_df, test_df, smiles_vocab)

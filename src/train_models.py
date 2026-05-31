@@ -28,35 +28,41 @@ import argparse
 import sklearn
 import wandb
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
 from rdkit import DataStructs
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-df = pd.read_csv('../data/lck_dockstring_data1.csv')
-
-affinity_scaler = MinMaxScaler()
-qed_scaler = MinMaxScaler()
-logp_scaler = MinMaxScaler()
-tpsas_scaler = MinMaxScaler()
-sas_scaler = MinMaxScaler()
-
-affinity_scaler.fit(df['affinity'].values.reshape(-1,1))
-qed_scaler.fit(df['qed'].values.reshape(-1,1))
-logp_scaler.fit(df['logp'].values.reshape(-1,1))
-tpsas_scaler.fit(df['tpsa'].values.reshape(-1,1))
-sas_scaler.fit(df['sas'].values.reshape(-1,1))
-
-with open('../data/train_df_with_sas.pkl', 'rb') as f:
-    train_df = pickle.load(f)
-with open('../data/test_df_with_sas.pkl', 'rb') as f:
-    test_df = pickle.load(f)
-
 SMI_MAX_SIZE = 300
 SMI_MIN_FREQ=1
 with open("../data/smiles_corpus.txt", "r") as f:
-    smiles_vocab = WordVocab(f, max_size=SMI_MAX_SIZE, min_freq=SMI_MIN_FREQ)
-
+        smiles_vocab = WordVocab(f, max_size=SMI_MAX_SIZE, min_freq=SMI_MIN_FREQ)
 print("Built vocabulary with size: ", len(smiles_vocab))
+
+def load_dataset(seed):
+    df = pd.read_csv('../data/lck_dockstring_data1.csv')
+    train_df,test_df = train_test_split(df, test_size=0.2, random_state=seed)
+    affinity_scaler = MinMaxScaler()
+    qed_scaler = MinMaxScaler()
+    logp_scaler = MinMaxScaler()
+    tpsas_scaler = MinMaxScaler()
+    sas_scaler = MinMaxScaler()
+    affinity_scaler.fit(train_df['affinity'].values.reshape(-1,1))
+    qed_scaler.fit(train_df['qeds'].values.reshape(-1,1))
+    logp_scaler.fit(train_df['logps'].values.reshape(-1,1))
+    tpsas_scaler.fit(train_df['tpsas'].values.reshape(-1,1))
+    sas_scaler.fit(train_df['sas'].values.reshape(-1,1))
+    train_df['affinity'] = affinity_scaler.transform(train_df['affinity'].values.reshape(-1,1))
+    train_df['qeds'] = qed_scaler.transform(train_df['qeds'].values.reshape(-1,1))
+    train_df['logps'] = logp_scaler.transform(train_df['logps'].values.reshape(-1,1))
+    train_df['tpsas'] = tpsas_scaler.transform(train_df['tpsas'].values.reshape(-1,1))
+    train_df['sas'] = sas_scaler.transform(train_df['sas'].values.reshape(-1,1))
+    test_df['affinity'] = affinity_scaler.transform(test_df['affinity'].values.reshape(-1,1))
+    test_df['qeds'] = qed_scaler.transform(test_df['qeds'].values.reshape(-1,1))
+    test_df['logps'] = logp_scaler.transform(test_df['logps'].values.reshape(-1,1))
+    test_df['tpsas'] = tpsas_scaler.transform(test_df['tpsas'].values.reshape(-1,1))
+    test_df['sas'] = sas_scaler.transform(test_df['sas'].values.reshape(-1,1))
+    return train_df,test_df,affinity_scaler,qed_scaler,logp_scaler,tpsas_scaler,sas_scaler
 
 # PyTorch Dataset for our model
 class CustomTargetDataset(Dataset):
@@ -185,7 +191,7 @@ class MolGPT2(nn.Module):
         return x
 
 # Training and validation steps
-def train_step(model, data_loader, optimizer,epoch):
+def train_step(model, data_loader, optimizer,epoch,smiles_vocab):
     running_loss = []
     model.to(device)
     model.train()
@@ -206,7 +212,7 @@ def train_step(model, data_loader, optimizer,epoch):
             print( 'Training Epoch: {} | iteration: {}/{} | Loss: {}'.format(epoch, i, len(data_loader), loss.item() ), end='\r',flush=True)
     return np.mean(running_loss)
         
-def val_step(model, data_loader, epoch):
+def val_step(model, data_loader, epoch, smiles_vocab):
     running_loss = []
     model.to(device)
     model.eval()
@@ -336,7 +342,7 @@ def compute_metrics(train_SMILES, test_SMILES, predicted_SMILES):
         'Internal Diversity': internal_diversity
     }
 
-def load_model(config,model_file_name='model.pt'):
+def load_model(config,model_file_name='model.pt', smiles_vocab=smiles_vocab):
     path_dir = '../checkpoints/'+ config['run_name']
     model_path = path_dir + '/' + model_file_name
     model = MolGPT2(d_model=config['d_model'], 
@@ -372,7 +378,7 @@ def load_model(config,model_file_name='model.pt'):
     model.eval()
     return model
 
-def run(config):
+def run(config,train_df,test_df,smiles_vocab):
     PROPERTIES = config['properties']
     train_dataset = CustomTargetDataset(train_df, smiles_vocab, properties_list=PROPERTIES)
     test_dataset = CustomTargetDataset(test_df, smiles_vocab, properties_list=PROPERTIES)
@@ -458,8 +464,8 @@ def run(config):
     
     for i in (range(start_epoch, config['epochs'])):
         time_start = time.time()
-        train_loss = train_step(model, train_loader, optimizer,i)
-        val_loss = val_step(model, test_loader, i)
+        train_loss = train_step(model, train_loader, optimizer,i,smiles_vocab=smiles_vocab)
+        val_loss = val_step(model, test_loader, i, smiles_vocab=smiles_vocab)
         tl.append(train_loss)
         vl.append(val_loss)
         wandb.log({"train_loss": train_loss, "val_loss": val_loss}, step=i)
@@ -495,7 +501,7 @@ def run(config):
         plt.close()
         
         if (i+1) % 10 == 0:
-            properties, pred_SMILES, test_SMILES  = sample_a_bunch(model, test_loader, greedy=False, temperature=1.0)
+            properties, pred_SMILES, test_SMILES  = sample_a_bunch(model, test_loader, greedy=False, temperature=1.0, smiles_vocab=smiles_vocab)
             results = compute_metrics(train_SMILES, test_SMILES, pred_SMILES)
             for key in results:
                 print(f"{key}: {results[key]}")
@@ -547,7 +553,10 @@ if __name__ == "__main__":
     parser.add_argument('--hidden_units', type=int, default=1024, help='Number of hidden units in feedforward layers')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--temp', type=float, default=1.0, help='Sampling temperature')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     args = parser.parse_args()
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     print("Properties to use: ", args.properties)
 
     config = {
@@ -564,11 +573,9 @@ if __name__ == "__main__":
         config['run_name'] = args.checkpoint_dir
     else:
         config['run_name'] = "encoder_decoder_"+ "_".join(prop for prop in config['properties'])
+    train_df,test_df,affinity_scaler,qed_scaler,logp_scaler,tpsas_scaler,sas_scaler = load_dataset(args.seed)
     print(f"device : {device}")
-    print(df.head())
-    print(f"Train Dataframe Size : {len(train_df)}")
-    print(f"Test Dataframe Size : {len(test_df)}")
     start_time = time.time()
-    run(config)
+    run(config,train_df,test_df,smiles_vocab)
     end_time = time.time()
     print(f"Total training time: {end_time - start_time} seconds")

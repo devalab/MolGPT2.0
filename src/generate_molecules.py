@@ -30,7 +30,7 @@ import wandb
 from sklearn.preprocessing import MinMaxScaler
 from rdkit import DataStructs
 
-from train_models import CustomTargetDataset, PositionalEncodings, PropertyEncoder, set_up_causal_mask, MolGPT2, Sampler, compute_metrics, load_model, sample_a_bunch
+from train_models import CustomTargetDataset, PositionalEncodings, PropertyEncoder, set_up_causal_mask, MolGPT2, Sampler, compute_metrics, load_model, sample_a_bunch,load_dataset
 print("Loaded libraries.")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -53,6 +53,7 @@ parser.add_argument('--logp_targets', nargs='+', type=float, default=[1,3,5], he
 parser.add_argument('--qed_targets', nargs='+', type=float, default=[0.4,0.6,0.8], help='Target QED values for generation')
 parser.add_argument('--tpsa_targets', nargs='+', type=float, default=[40,70,100], help='Target TPSA values for generation')
 parser.add_argument('--sas_targets', nargs='+', type=float, default=[2,3,4], help='Target SAS values for generation')
+parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
 args = parser.parse_args()
 print("Properties to use: ", args.properties)
 
@@ -70,37 +71,14 @@ if args.checkpoint_dir is not None:
 else:
     config['run_name'] = "encoder_decoder_"+ "_".join(prop for prop in config['properties'])
 
-df = pd.read_csv('../data/lck_dockstring_data1.csv')
-print(df.head())
-
-affinity_scaler = MinMaxScaler()
-qed_scaler = MinMaxScaler()
-logp_scaler = MinMaxScaler()
-tpsas_scaler = MinMaxScaler()
-sas_scaler = MinMaxScaler()
-
-affinity_scaler.fit(df['affinity'].values.reshape(-1,1))
-qed_scaler.fit(df['qed'].values.reshape(-1,1))
-logp_scaler.fit(df['logp'].values.reshape(-1,1))
-tpsas_scaler.fit(df['tpsa'].values.reshape(-1,1))
-sas_scaler.fit(df['sas'].values.reshape(-1,1))
-
-with open('../data/train_df_with_sas.pkl', 'rb') as f:
-    train_df = pickle.load(f)
-with open('../data/test_df_with_sas.pkl', 'rb') as f:
-    test_df = pickle.load(f)
-
-print("Train Dataframe : ")
-print(train_df.head())
-print("Test Dataframe : ")
-print(test_df.head())
-
 SMI_MAX_SIZE = 300
 SMI_MIN_FREQ=1
 with open("../data/smiles_corpus.txt", "r") as f:
     smiles_vocab = WordVocab(f, max_size=SMI_MAX_SIZE, min_freq=SMI_MIN_FREQ)
 
 print("Built vocabulary with size: ", len(smiles_vocab))
+
+train_df,test_df,affinity_scaler,qed_scaler,logp_scaler,tpsas_scaler,sas_scaler = load_dataset(args.seed)
 
 test_dataset = CustomTargetDataset(test_df, smiles_vocab, properties_list=config['properties'])
 test_loader = DataLoader(test_dataset, batch_size=config["batch_size"], shuffle=True)

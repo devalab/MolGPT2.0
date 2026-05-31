@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,6 +18,7 @@ from dockstring import load_target
 import multiprocessing as mp
 
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
 
 import math
 
@@ -37,11 +37,8 @@ plt.rcParams.update({
     'figure.autolayout': True
 })
 
-
-
 sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
 import sascorer
-
 
 parser = argparse.ArgumentParser(description='Analyze generated molecules')
 parser.add_argument('--checkpoint_dir', type=str, required=True, 
@@ -50,27 +47,13 @@ parser.add_argument('--properties', nargs='+', required=True,
                     help='Properties used (e.g., --properties affinity logps qeds sas tpsas)')
 parser.add_argument('--plot_targets', nargs='*', default=[],
                     help='Specific target values to plot for properties (e.g., --plot_targets affinity=9.0,6.0 logps=2.0)')
-parser.add_argument('--plot_kde_separately', action='store_true',
+parser.add_argument('--plot_kde_separately', action='store_false',
                     help='Plot KDEs separately for each target value')
 parser.add_argument('--temp', type=float, default=1.0, help='Temperature at which molecules were sampled')
+parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
 args = parser.parse_args()
 
-
-# Load the original dataset to fit scalers
 df = pd.read_csv('../data/lck_dockstring_data1.csv')
-
-affinity_scaler = MinMaxScaler()
-qed_scaler = MinMaxScaler()
-logp_scaler = MinMaxScaler()
-tpsas_scaler = MinMaxScaler()
-sas_scaler = MinMaxScaler()
-
-affinity_scaler.fit(df['affinity'].values.reshape(-1,1))
-qed_scaler.fit(df['qed'].values.reshape(-1,1))
-logp_scaler.fit(df['logp'].values.reshape(-1,1))
-tpsas_scaler.fit(df['tpsa'].values.reshape(-1,1))
-sas_scaler.fit(df['sas'].values.reshape(-1,1))
-
 
 def calc_properties(properties, smiles):
     """Calculate molecular properties for a list of SMILES."""
@@ -118,7 +101,6 @@ def calculate_binding_affinities(smiles_list, batch_size=16):
     """Calculate binding affinities for a list of SMILES using multiprocessing."""
     print(f"Calculating binding affinities for {len(smiles_list)} molecules...")
     
-    # Pad to multiple of batch_size
     smiles_array = np.array(smiles_list)
     if len(smiles_array) % batch_size != 0:
         padding = batch_size - (len(smiles_array) % batch_size)
@@ -132,36 +114,23 @@ def calculate_binding_affinities(smiles_list, batch_size=16):
             scores = pool.map(dock_smile, batch)
         all_scores.extend(scores)
     
-    # Return only the original length (remove padding)
     all_scores = all_scores[:len(smiles_list)]
     return np.array(all_scores)
 
 
 def load_and_calculate_properties(checkpoint_dir, prop_names, temp):
-    """Load generated molecules and calculate their properties.
-    
-    Only compute docking affinities if 'affinity' is present in prop_names.
-    """
-     
-     # Load generated results
+    """Load generated molecules and calculate their properties."""
     results_path = os.path.join(checkpoint_dir, f'generated_molecules_temp_{temp}.pkl')
     with open(results_path, 'rb') as f:
          results_dict = pickle.load(f)
-     
     print(f"Loaded {len(results_dict)} query results")
      
-    # Calculate properties for each query
     final_results = {}
-   
     compute_affinities = ('affinity' in prop_names)
     
     train_smiles = set()
-    try:
-        df_train = pd.read_csv('../data/lck_dockstring_data1.csv')
-        if 'smiles' in df_train.columns:
-            train_smiles = set(df_train['smiles'].tolist())
-    except Exception as e:
-        print(f"Warning: Could not load training SMILES for novelty calculation: {e}")
+    train_df,test_df = train_test_split(df, test_size=0.2, random_state=args.seed)
+    train_smiles = set(train_df['smiles'].tolist())
 
     generation_metrics = []
     total_gen = 0
@@ -171,69 +140,19 @@ def load_and_calculate_properties(checkpoint_dir, prop_names, temp):
     for key, samples in tqdm(results_dict.items(), desc="Calculating properties"):
         print(f"\nProcessing {key}...")
          
-        # Calculate chemical properties
         qeds, logps, tpsas, sas, molwt, og_props, smi = calc_properties([-1]*len(samples), samples)
          
-        # Calculate binding affinities using dockstring only if requested
         if compute_affinities:
             affinities = calculate_binding_affinities(smi)
         else:
           affinities = [None] * len(smi)
-         
+        
         final_results[key] = [logps, qeds, sas, tpsas, affinities, samples]
-        
-        # Calculate generation metrics
-        num_gen = len(samples)
-        num_val = len(smi)
-        validity = num_val / num_gen if num_gen > 0 else 0
-        uniq_set = set(smi)
-        num_uniq = len(uniq_set)
-        uniqueness = num_uniq / num_val if num_val > 0 else 0
-        novel_set = uniq_set - train_smiles
-        num_novel = len(novel_set)
-        novelty = num_novel / num_uniq if num_uniq > 0 else 0
-        
-        generation_metrics.append({
-            'combo': str(key),
-            'num_generated': num_gen,
-            'num_valid': num_val,
-            'validity': validity,
-            'num_unique': num_uniq,
-            'uniqueness': uniqueness,
-            'num_novel': num_novel,
-            'novelty': novelty
-        })
-        total_gen += num_gen
-        total_val += num_val
-        all_valid_smi_set.update(smi)
      
-    # Save final results with all properties
     output_path = os.path.join(checkpoint_dir, f'generated_results_with_properties_temp_{temp}.pkl')
     with open(output_path, 'wb') as f:
         pickle.dump(final_results, f)
-     
     print(f"\nSaved results to: {output_path}")
-
-    # Compute ALL metrics
-    total_uniq_set = all_valid_smi_set
-    total_uniq = len(total_uniq_set)
-    total_novel_set = total_uniq_set - train_smiles
-    total_novel = len(total_novel_set)
-    generation_metrics.append({
-        'combo': 'ALL',
-        'num_generated': total_gen,
-        'num_valid': total_val,
-        'validity': total_val / total_gen if total_gen > 0 else 0,
-        'num_unique': total_uniq,
-        'uniqueness': total_uniq / total_val if total_val > 0 else 0,
-        'num_novel': total_novel,
-        'novelty': total_novel / total_uniq if total_uniq > 0 else 0
-    })
-    
-    gen_df = pd.DataFrame(generation_metrics)
-    gen_metrics_path = os.path.join(checkpoint_dir, f'generation_metrics_temp_{temp}.csv')
-    gen_df.to_csv(gen_metrics_path, index=False)
-    print(f"Saved generation metrics to: {gen_metrics_path}")
      
     return final_results
 
@@ -250,18 +169,16 @@ def create_dataframe(results_dict, prop_names):
     columns.append('key')
     
     for key in results_dict:
-        # keys were created as strings (e.g. '3.5_0.7_...').
-        # Try to convert each key-part to float so Target columns are numeric.
         raw_keys = key.split('_')
         conv_keys = []
         for k in raw_keys:
             try:
                 conv_keys.append(float(k))
             except Exception:
+                print(f"{Exception} while converting {k} in key: {key}")
                 conv_keys.append(k)
 
         for i in range(len(results_dict[key][0])):
-            # Filter out None affinities
             if (results_dict[key][4][i] is not None) or ('affinity' not in prop_names):
                 row = conv_keys + [
                     results_dict[key][0][i],  # logps
@@ -274,8 +191,7 @@ def create_dataframe(results_dict, prop_names):
                 data.append(row)
     
     data_df = pd.DataFrame(data, columns=columns)
-
-    # Ensure numeric columns are numeric (coerce non-convertible values to NaN).
+    
     for col in columns:
         if col.startswith('Target') or col.startswith('Predicted'):
             data_df[col] = pd.to_numeric(data_df[col], errors='coerce')
@@ -290,9 +206,6 @@ def _gaussian_pdf(x, mu, sigma):
 def compute_metrics_for_property(data_df, prop_name, checkpoint_dir, temp, sigma=0.05):
     """Compute MAE, variance, and KL divergence (predicted vs Gaussian(target,sigma))
     for each unique target property value.
-
-    Groups rows by unique target values and computes metrics within each group.
-    Saves results to metrics_<prop_name>.csv in checkpoint_dir and returns the DataFrame.
     """
     target_col = f'Target {prop_name}'
     pred_col = f'Predicted {prop_name}'
@@ -306,13 +219,11 @@ def compute_metrics_for_property(data_df, prop_name, checkpoint_dir, temp, sigma
         print(f"No data for {prop_name}")
         return None
 
-    # Get unique target values and sort them
     unique_targets = sorted(df[target_col].unique())
     results = []
     eps = 1e-12
 
     for target_val in unique_targets:
-        # Get all rows with this target value
         mask = df[target_col] == target_val
         tvals = df.loc[mask, target_col].values
         preds = df.loc[mask, pred_col].values
@@ -331,24 +242,17 @@ def compute_metrics_for_property(data_df, prop_name, checkpoint_dir, temp, sigma
             })
             continue
 
-        # MAE between predicted and target
         mae = np.mean(np.abs(preds - tvals))
         
-        # Variance of predictions
         var_pred = np.var(preds)
 
-        # Standard deviation of predictions
         std_pred = np.std(preds)
 
-        # Mean of predictions
         mean_pred = np.mean(preds)
 
-        # Success rates
         sr_05 = np.mean(np.abs(preds - tvals) <= 0.5)
         sr_10 = np.mean(np.abs(preds - tvals) <= 1.0)
 
-        # KL divergence between empirical predicted distribution and Gaussian(target_val, sigma)
-        # empirical p from histogram
         counts, edges = np.histogram(preds, bins=20)
         p_counts = counts.astype(float)
         if p_counts.sum() == 0:
@@ -356,7 +260,6 @@ def compute_metrics_for_property(data_df, prop_name, checkpoint_dir, temp, sigma
         else:
             p_prob = p_counts / p_counts.sum()
             centers = 0.5 * (edges[:-1] + edges[1:])
-            # Gaussian centered at the target value with std=sigma
             q_vals = _gaussian_pdf(centers, target_val, sigma)
             q_prob = q_vals / (q_vals.sum() + eps)
             p_safe = p_prob + eps
@@ -382,7 +285,6 @@ def compute_metrics_for_property(data_df, prop_name, checkpoint_dir, temp, sigma
     return res_df
 
 def compute_all_metrics(data_df, prop_names, checkpoint_dir, temp):
-    # compute metrics for each property available in the dataframe
     for prop in ['logps','qeds','sas','tpsas','affinity']:
         compute_metrics_for_property(data_df, prop, checkpoint_dir, temp)
 
@@ -435,7 +337,6 @@ def plot_single_property_kdes(data_df, prop_names, target_props, results_dir, te
             plt.figure(figsize=(10, 6))
             if plot_kde_separately:
                 unique_targets = sorted(plt_df[target_col].unique())
-                #colors = sns.color_palette("husl", len(unique_targets))
                 for idx, target_val in enumerate(unique_targets):
                     subset = plt_df[plt_df[target_col] == target_val]["Predicted logps"].dropna()
                     if len(subset) > 0:
@@ -449,12 +350,10 @@ def plot_single_property_kdes(data_df, prop_names, target_props, results_dir, te
             else:
                 ax = sns.kdeplot(data=plt_df, x="Predicted logps", hue=target_col, 
                                 fill=True, alpha=0.5, linewidth=1, bw_adjust=2)
-            # Add vertical dotted lines at target values
             for target_val in sorted(plt_df[target_col].unique()):
                 plt.axvline(x=target_val, color='black', linestyle='--', linewidth=1, alpha=0.7)
             plt.title('LogP Distribution (Generated vs Target)')
             caption = "Figure: LogP Distribution (Generated vs Target). Dotted lines mark the target conditions."
-            #plt.figtext(0.5, -0.05, caption, wrap=True, horizontalalignment='center', fontsize=20)
 
             plt.savefig(os.path.join(results_dir, f'logp_kde{target_suffix}_temp_{temp}.png'), dpi=300, bbox_inches='tight')
             plt.close()
@@ -473,7 +372,6 @@ def plot_single_property_kdes(data_df, prop_names, target_props, results_dir, te
             plt.figure(figsize=(10, 6))
             if plot_kde_separately:
                 unique_targets = sorted(plt_df[target_col].unique())
-                #colors = sns.color_palette("husl", len(unique_targets))
                 for idx, target_val in enumerate(unique_targets):
                     subset = plt_df[plt_df[target_col] == target_val]["Predicted qeds"].dropna()
                     if len(subset) > 0:
@@ -487,12 +385,10 @@ def plot_single_property_kdes(data_df, prop_names, target_props, results_dir, te
             else:
                 ax = sns.kdeplot(data=plt_df, x="Predicted qeds", hue=target_col, 
                                 fill=True, alpha=0.5, linewidth=1, bw_adjust=2)
-            # Add vertical dotted lines at target values
             for target_val in sorted(plt_df[target_col].unique()):
                 plt.axvline(x=target_val, color='black', linestyle='--', linewidth=1, alpha=0.7)
             plt.title('QED Distribution (Generated vs Target)')
             caption = "Figure: QED Distribution (Generated vs Target). Dotted lines mark the target conditions."
-            #plt.figtext(0.5, -0.05, caption, wrap=True, horizontalalignment='center', fontsize=20)
 
             plt.savefig(os.path.join(results_dir, f'qed_kde{target_suffix}_temp_{temp}.png'), dpi=300, bbox_inches='tight')
             plt.close()
@@ -511,7 +407,6 @@ def plot_single_property_kdes(data_df, prop_names, target_props, results_dir, te
             plt.figure(figsize=(10, 6))
             if plot_kde_separately:
                 unique_targets = sorted(plt_df[target_col].unique())
-                #colors = sns.color_palette("husl", len(unique_targets))
                 for idx, target_val in enumerate(unique_targets):
                     subset = plt_df[plt_df[target_col] == target_val]["Predicted tpsas"].dropna()
                     if len(subset) > 0:
@@ -525,12 +420,10 @@ def plot_single_property_kdes(data_df, prop_names, target_props, results_dir, te
             else:
                 ax = sns.kdeplot(data=plt_df, x="Predicted tpsas", hue=target_col, 
                                 fill=True, alpha=0.5, linewidth=1, bw_adjust=2)
-            # Add vertical dotted lines at target values
             for target_val in sorted(plt_df[target_col].unique()):
                 plt.axvline(x=target_val, color='black', linestyle='--', linewidth=1, alpha=0.7)
             plt.title('TPSA Distribution (Generated vs Target)')
             caption = "Figure: TPSA Distribution (Generated vs Target). Dotted lines mark the target conditions."
-            #plt.figtext(0.5, -0.05, caption, wrap=True, horizontalalignment='center', fontsize=20)
 
             plt.savefig(os.path.join(results_dir, f'tpsa_kde{target_suffix}_temp_{temp}.png'), dpi=300, bbox_inches='tight')
             plt.close()
@@ -549,7 +442,6 @@ def plot_single_property_kdes(data_df, prop_names, target_props, results_dir, te
             plt.figure(figsize=(10, 6))
             if plot_kde_separately:
                 unique_targets = sorted(plt_df[target_col].unique())
-                #colors = sns.color_palette("husl", len(unique_targets))
                 for idx, target_val in enumerate(unique_targets):
                     subset = plt_df[plt_df[target_col] == target_val]["Predicted sas"].dropna()
                     if len(subset) > 0:
@@ -563,12 +455,10 @@ def plot_single_property_kdes(data_df, prop_names, target_props, results_dir, te
             else:
                 ax = sns.kdeplot(data=plt_df, x="Predicted sas", hue=target_col, 
                                 fill=True, alpha=0.5, linewidth=1, bw_adjust=2)
-            # Add vertical dotted lines at target values
             for target_val in sorted(plt_df[target_col].unique()):
                 plt.axvline(x=target_val, color='black', linestyle='--', linewidth=1, alpha=0.7)
             plt.title('SAS Distribution (Generated vs Target)')
             caption = "Figure: SAS Distribution (Generated vs Target). Dotted lines mark the target conditions."
-            #plt.figtext(0.5, -0.05, caption, wrap=True, horizontalalignment='center', fontsize=20)
 
             plt.savefig(os.path.join(results_dir, f'sas_kde{target_suffix}_temp_{temp}.png'), dpi=300, bbox_inches='tight')
             plt.close()
@@ -587,7 +477,6 @@ def plot_single_property_kdes(data_df, prop_names, target_props, results_dir, te
             plt.figure(figsize=(10, 6))
             if plot_kde_separately:
                 unique_targets = sorted(plt_df[target_col].unique())
-                # colors = sns.color_palette("husl", len(unique_targets))
                 for idx, target_val in enumerate(unique_targets):
                     subset = plt_df[plt_df[target_col] == target_val]["Predicted affinity"].dropna()
                     if len(subset) > 0:
@@ -600,13 +489,11 @@ def plot_single_property_kdes(data_df, prop_names, target_props, results_dir, te
             else:
                 ax = sns.kdeplot(data=plt_df, x="Predicted affinity", hue=target_col, 
                                 fill=True, alpha=0.5, linewidth=1, bw_adjust=2)
-            # Add vertical dotted lines at target values
             for target_val in sorted(plt_df[target_col].unique()):
                 plt.axvline(x=target_val, color='black', linestyle='--', linewidth=1, alpha=0.7)
             plt.title('Binding Affinity Distribution (Generated vs Target)')
             plt.xlabel('Binding Affinity (kcal/mol)')
             caption = "Figure: Binding Affinity Distribution (Generated vs Target). Dotted lines mark the target conditions."
-            #plt.figtext(0.5, -0.05, caption, wrap=True, horizontalalignment='center', fontsize=20)
 
             plt.savefig(os.path.join(results_dir, f'affinity_kde{target_suffix}_temp_{temp}.png'), dpi=300, bbox_inches='tight')
             plt.close()
@@ -879,7 +766,7 @@ def plot_dual_property_kdes(data_df, prop_names, target_props, results_dir, temp
 
 
 def main():
-    checkpoint_dir = args.checkpoint_dir
+    checkpoint_dir = "../checkpoints/" + args.checkpoint_dir
     prop_names = args.properties
     temp = args.temp
      
@@ -889,10 +776,8 @@ def main():
     print(f"Temperature: {temp}")
     print("="*50)
      
-    # Load and calculate properties
     results_dict = load_and_calculate_properties(checkpoint_dir, prop_names, temp)
      
-    # Determine which properties were used as targets
     target_props = {}
     if 'affinity' in prop_names:
         target_props['affinity'] = True
@@ -909,30 +794,23 @@ def main():
     data_df = create_dataframe(results_dict, prop_names)
     data_df.to_csv(os.path.join(checkpoint_dir, f'generated_data_temp_{temp}.csv'), index=False)
     print(f"\nSaved DataFrame to: {os.path.join(checkpoint_dir, f'generated_data_temp_{temp}.csv')}")
-    # Compute MAE, variance, and KL divergence per-property across target-value bins
-    # Load previously saved results with properties
     data_df = pd.read_csv(os.path.join(checkpoint_dir, f'generated_data_temp_{temp}.csv'))
     print("\nComputing per-property metrics (MAE, variance, KL vs Gaussian sigma=0.05)...")
     compute_all_metrics(data_df, prop_names, checkpoint_dir, temp)
     
-    # Parse plot targets
     plot_targets_dict = {}
     if hasattr(args, 'plot_targets') and args.plot_targets:
         for pt in args.plot_targets:
             prop, vals = pt.split('=')
             plot_targets_dict[prop] = [float(v) for v in vals.split(',')]
             
-    # Plot single property KDEs
     plot_single_property_kdes(data_df, prop_names, target_props, checkpoint_dir, temp, plot_targets_dict, args.plot_kde_separately)
     
-    # Plot dual property KDEs
     plot_dual_property_kdes(data_df, prop_names, target_props, checkpoint_dir, temp, plot_targets_dict)
     
-    # Generate sample molecule images
     generate_molecule_images(checkpoint_dir, temp)
     
     print(f"All results saved to: {checkpoint_dir}")
-
 
 if __name__ == "__main__":
     main()
