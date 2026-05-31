@@ -27,20 +27,43 @@ from rdkit.Chem import MolFromSmiles
 import argparse
 import sklearn
 import wandb
-
+from sklearn.preprocessing import MinMaxScaler
+from rdkit import DataStructs
+print("Loaded libraries.")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"device : {device}")
 
-
-
 parser = argparse.ArgumentParser(description='Train model')
 parser.add_argument('--properties', nargs='+', required=True, 
                     help='Properties to use (e.g., --properties affinity logps)')
-parser.add_argument('--temp', type=float, default=0.5, help='Sampling temperature')
+parser.add_argument('--checkpoint_dir', type=str, default=None, help='Directory to save checkpoints and logs')
+parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training')
+parser.add_argument('--d_model', type=int, default=256, help='Transformer model dimension')
+parser.add_argument('--n_heads', type=int, default=8, help='Number of attention heads')
+parser.add_argument('--n_layers', type=int, default=8, help='Number of transformer layers')
+parser.add_argument('--hidden_units', type=int, default=1024, help='Number of hidden units in feedforward layers')
+parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
+parser.add_argument('--temp', type=float, default=1.0, help='Sampling temperature')
 args = parser.parse_args()
 print("Properties to use: ", args.properties)
-print("Sampling temperature: ", args.temp)
+
+config = {
+    'batch_size' : args.batch_size,
+    'd_model': args.d_model,
+    'n_heads': args.n_heads,
+    'n_layers': args.n_layers,
+    'hidden_units': args.hidden_units,
+    'lr': args.lr,
+    'epochs': args.epochs,
+    'properties': sorted(args.properties)
+}
+if args.checkpoint_dir is not None:
+    config['run_name'] = args.checkpoint_dir
+else:
+    config['run_name'] = "encoder_decoder"+ "_".join(prop for prop in config['properties'])
+
 
 
 df = pd.read_csv('../data/lck_dockstring_data1.csv')
@@ -58,22 +81,30 @@ logp_scaler.fit(df['logp'].values.reshape(-1,1))
 tpsas_scaler.fit(df['tpsa'].values.reshape(-1,1))
 sas_scaler.fit(df['sas'].values.reshape(-1,1))
 
-df['qeds'] = qed_scaler.transform(df['qed'].values.reshape(-1,1))
-df['logps'] = logp_scaler.transform(df['logp'].values.reshape(-1,1))
-df['tpsas'] = tpsas_scaler.transform(df['tpsa'].values.reshape(-1,1))
-df['affinity'] = affinity_scaler.transform(df['affinity'].values.reshape(-1,1))
-df['sas'] = sas_scaler.transform(df['sas'].values.reshape(-1,1))
+# df['qeds'] = qed_scaler.transform(df['qed'].values.reshape(-1,1))
+# df['logps'] = logp_scaler.transform(df['logp'].values.reshape(-1,1))
+# df['tpsas'] = tpsas_scaler.transform(df['tpsa'].values.reshape(-1,1))
+# df['affinity'] = affinity_scaler.transform(df['affinity'].values.reshape(-1,1))
+# df['sas'] = sas_scaler.transform(df['sas'].values.reshape(-1,1))
 
 with open('../data/train_df_with_sas.pkl', 'rb') as f:
     train_df = pickle.load(f)
 with open('../data/test_df_with_sas.pkl', 'rb') as f:
     test_df = pickle.load(f)
 
+print("Train Dataframe : ")
+print(train_df.head())
+print("Test Dataframe : ")
+print(test_df.head())
+
 SMI_MAX_SIZE = 300
 SMI_MIN_FREQ=1
 with open("../data/smiles_corpus.txt", "r") as f:
     smiles_vocab = WordVocab(f, max_size=SMI_MAX_SIZE, min_freq=SMI_MIN_FREQ)
 
+print("Built vocabulary with size: ", len(smiles_vocab))
+
+# PyTorch Dataset for our model
 class CustomTargetDataset(Dataset):
     def __init__(self, df, vocab, properties_list):
         self.df = df.reset_index(drop=True)
@@ -94,7 +125,7 @@ class CustomTargetDataset(Dataset):
             "smiles": smi
         }
 
-
+# Positional Encoding Layer for Transformer
 class PositionalEncodings(nn.Module):
     """Attention is All You Need positional encoding layer"""
 
@@ -119,7 +150,7 @@ class PositionalEncodings(nn.Module):
         x = self.dropout(x)
         return x
 
-
+# Property Encoder for generating property embeddings
 class PropertyEncoder(nn.Module):
     def __init__(self, d_model, n_properties):
         super(PropertyEncoder, self).__init__()
@@ -133,17 +164,17 @@ class PropertyEncoder(nn.Module):
         #     x = self.layer_final[i](out)        
         return torch.stack(outs, dim=1)
 
-
+# Causal mask for masked attention
 def set_up_causal_mask(seq_len):
     mask = (torch.triu(torch.ones(seq_len, seq_len)) == 1).transpose(0, 1)
     mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
     mask.requires_grad = False
     return mask
 
-
-class SmileDecoder(nn.Module):
+# MolGPT2 model architecture (encoder-decoder)
+class MolGPT2(nn.Module):
     def __init__(self, d_model, n_heads, n_layers, vocab, n_properties, hidden_units=1024, dropout=0.1):
-        super(SmileDecoder, self).__init__()
+        super(MolGPT2, self).__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.n_layers = n_layers
@@ -203,7 +234,7 @@ class SmileDecoder(nn.Module):
         x = self.classifier(x)
         return x
 
-
+# Training and validation steps
 def train_step(model, data_loader, optimizer,epoch):
     running_loss = []
     model.to(device)
@@ -212,18 +243,17 @@ def train_step(model, data_loader, optimizer,epoch):
         # data = {k: v.to(device) for k, v in data.items()}
         data['smiles_rep'] = data['smiles_rep'].to(device)
         data['properties'] = data['properties'].to(device)
-        
         optimizer.zero_grad()
         out = model(data['smiles_rep'], data['properties'])
         out = out[:,:-1,:]
         y = data['smiles_rep'][:,1:]
         loss = F.cross_entropy(out.contiguous().view(-1, len(smiles_vocab)),y.contiguous().view(-1))
         loss.backward()
-        optimizer.step()
         nn.utils.clip_grad_value_(model.parameters(), clip_value=1.0)
+        optimizer.step()
         running_loss.append(loss.item())
-        print( 'Training Epoch: {} | iteration: {}/{} | Loss: {}'.format(epoch, i, len(data_loader), loss.item() ), end='\r',flush=True)
-        
+        if (i+1) % 10 == 0:
+            print( 'Training Epoch: {} | iteration: {}/{} | Loss: {}'.format(epoch, i, len(data_loader), loss.item() ), end='\r',flush=True)
     return np.mean(running_loss)
         
 def val_step(model, data_loader, epoch):
@@ -241,12 +271,12 @@ def val_step(model, data_loader, epoch):
             y = data['smiles_rep'][:,1:]
             loss = F.cross_entropy(out.contiguous().view(-1, len(smiles_vocab)),y.contiguous().view(-1))
             running_loss.append(loss.item())
-            print( 'Validating Epoch: {} | iteration: {}/{} | Loss: {}'.format(epoch, i, len(data_loader), loss.item() ), end='\r',flush=True)
-        
+            if (i+1) % 10 == 0:
+                print( 'Validating Epoch: {} | iteration: {}/{} | Loss: {}'.format(epoch, i, len(data_loader), loss.item() ), end='\r',flush=True)
     return np.mean(running_loss)
 
 
-
+# Function to save model and config
 def save_model(model, config,model_file_name='model.pt'):
     path_dir = '../checkpoints/'+ config['run_name']
     if not os.path.exists(path_dir):
@@ -258,9 +288,9 @@ def save_model(model, config,model_file_name='model.pt'):
         yaml.dump(dict(config), yaml_file)
         
 
-
+# Class for sampling molecules
 class Sampler:
-    def __init__(self, model, vocab, temperature=0.5):
+    def __init__(self, model, vocab, temperature=1.0):
         self.model = model
         self.vocab = vocab
         self.temperature = temperature
@@ -301,9 +331,7 @@ class Sampler:
                 samples.append(final_smile)
         return samples
             
-
-
-def sample_a_bunch(model, dataloader, greedy=False, temperature=0.5):
+def sample_a_bunch(model, dataloader, greedy=False, temperature=1.0):
     sampler = Sampler(model, smiles_vocab, temperature=temperature)
     model.eval()
     samples = []
@@ -322,9 +350,7 @@ def sample_a_bunch(model, dataloader, greedy=False, temperature=0.5):
                 break
     return np.array(properties), samples, og_smiles
 
-
-
-
+# Code for computing metrics like validity, novelty, uniqueness, and internal diversity
 def is_valid_smiles(smiles):
     """Check if a SMILES string is valid."""
     return Chem.MolFromSmiles(smiles) is not None
@@ -343,7 +369,6 @@ def compute_metrics(train_SMILES, test_SMILES, predicted_SMILES):
     uniqueness = len(unique_predicted) / len(valid_predicted) if valid_predicted else 0
 
     # Internal Diversity
-    from rdkit import DataStructs
     mols = [Chem.MolFromSmiles(smi) for smi in valid_predicted]
     fps = [AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=1024) for mol in mols if mol is not None]
     internal_diversity = 0.0
@@ -361,6 +386,41 @@ def compute_metrics(train_SMILES, test_SMILES, predicted_SMILES):
         'Internal Diversity': internal_diversity
     }
 
+def load_model(config,model_file_name='model.pt'):
+    path_dir = '../checkpoints/'+ config['run_name']
+    model_path = path_dir + '/' + model_file_name
+    model = MolGPT2(d_model=config['d_model'], 
+                   n_heads=config['n_heads'], 
+                   n_layers=config['n_layers'], 
+                   vocab=smiles_vocab, 
+                   n_properties=len(config['properties']), 
+                   hidden_units=config['hidden_units'],
+                   dropout=0.1)
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config['lr'])
+    model.to(device)
+    num_gpus = torch.cuda.device_count()
+    print("No of GPUs available", num_gpus)
+    try:
+        model = torch.nn.parallel.DataParallel(model)
+        model.load_state_dict(torch.load(model_path))
+    except RuntimeError:
+        model = MolGPT2(d_model=config['d_model'], 
+                   n_heads=config['n_heads'], 
+                   n_layers=config['n_layers'], 
+                   vocab=smiles_vocab, 
+                   n_properties=len(config['properties']), 
+                   hidden_units=config['hidden_units'],
+                   dropout=0.1)
+        model.to(device)
+        model.load_state_dict(torch.load(model_path))
+        model = torch.nn.parallel.DataParallel(model)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total parameters: {total_params}")
+    if not os.path.exists(path_dir):
+        os.makedirs(path_dir)
+    model.eval()
+    return model
 
 def run(config):
     PROPERTIES = config['properties']
@@ -374,7 +434,7 @@ def run(config):
     
     data = next(iter(train_loader))
  
-    model = SmileDecoder(d_model=config['d_model'], 
+    model = MolGPT2(d_model=config['d_model'], 
                    n_heads=config['n_heads'], 
                    n_layers=config['n_layers'], 
                    vocab=smiles_vocab, 
@@ -382,6 +442,8 @@ def run(config):
                    hidden_units=config['hidden_units'],
                    dropout=0.1)
     model = torch.nn.parallel.DataParallel(model)
+
+    os.makedirs('../checkpoints', exist_ok=True)
     path_dir = '../checkpoints/'+ config['run_name']
     os.makedirs(path_dir, exist_ok=True)
     
@@ -405,6 +467,7 @@ def run(config):
     metric_records = []
     epoch_records = []
 
+    #load previously trained model if exists and resume training from there
     last_model_path = os.path.join(path_dir, 'last_model.pt')
     if os.path.exists(last_model_path):
         print(f"Loading last model from {last_model_path} to resume from epoch {start_epoch}")
@@ -452,16 +515,16 @@ def run(config):
         wandb.log({"train_loss": train_loss, "val_loss": val_loss}, step=i)
         
         # Save last, best
-        torch.save(model.state_dict(), os.path.join(path_dir, 'last_model.pt'))
+        # torch.save(model.state_dict(), os.path.join(path_dir, 'last_model.pt'))
+        save_model(model, config, model_file_name='last_model.pt')
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             with open(os.path.join(path_dir, 'best_val_loss.txt'), 'w') as f:
                 f.write(str(best_val_loss))
-            torch.save(model.state_dict(), os.path.join(path_dir, 'best_model.pt'))
+            # torch.save(model.state_dict(), os.path.join(path_dir, 'best_model.pt'))
+            save_model(model, config, model_file_name='best_model.pt')
             with open(os.path.join(path_dir, 'best_epoch.txt'), 'w') as f:
                 f.write(str(i+1))
-        # if (i + 1) % 10 == 0:
-        #     torch.save(model.state_dict(), os.path.join(path_dir, f'model_{i+1}.pt'))
             
         try:
             with open(os.path.join(path_dir, "num_epochs.txt"), "w") as f:
@@ -471,7 +534,8 @@ def run(config):
             
         with open(os.path.join(path_dir, "losses.pkl"), "wb") as f:
             pickle.dump({"train_losses": tl, "val_losses": vl}, f)
-            
+        
+        #for constantly plotting loss function    
         plt.figure()
         plt.plot(tl, label='Train Loss')
         plt.plot(vl, label='Val Loss')
@@ -503,7 +567,7 @@ def run(config):
             plt.close()
             
             df = pd.DataFrame({"SMILES":pred_SMILES})
-            df.to_csv(os.path.join(path_dir, f'sampled_mols_epoch.txt'))
+            df.to_csv(os.path.join(path_dir, f'sampled_mols_epoch.txt'), index=False)
             
         time_end = time.time()
         print(f"Time Taken for Epoch {i} : {time_end - time_start} seconds",flush=True)
@@ -521,56 +585,10 @@ def run(config):
     plt.savefig(os.path.join(path_dir, "loss_plot.png"))
     plt.close()
 
-columns = ['smiles', 'affinity', 'logps', 'qeds', 'tpsas', 'split']
-config = {
-    'batch_size' : 128,
-    'd_model': 256,
-    'n_heads': 8,
-    'n_layers': 8,
-    'hidden_units': 1024,
-    'lr': 3e-4,
-    'epochs': 300,
-    'properties': sorted(args.properties) # change here for different properties,
-}
-config['run_name'] = "encoder_decoder_8_layer_"+ "_".join(prop for prop in config['properties'])
-
-def load_model(config,model_file_name='model.pt'):
-    path_dir = '../checkpoints/'+ config['run_name']
-    model_path = path_dir + '/' + model_file_name
-    model = SmileDecoder(d_model=config['d_model'], 
-                   n_heads=config['n_heads'], 
-                   n_layers=config['n_layers'], 
-                   vocab=smiles_vocab, 
-                   n_properties=len(config['properties']), 
-                   hidden_units=config['hidden_units'],
-                   dropout=0.1)
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config['lr'])
-    model.to(device)
-    num_gpus = torch.cuda.device_count()
-    print("No of GPUs available", num_gpus)
-    try:
-        model = torch.nn.parallel.DataParallel(model)
-        model.load_state_dict(torch.load(model_path))
-    except RuntimeError:
-        model = SmileDecoder(d_model=config['d_model'], 
-                   n_heads=config['n_heads'], 
-                   n_layers=config['n_layers'], 
-                   vocab=smiles_vocab, 
-                   n_properties=len(config['properties']), 
-                   hidden_units=config['hidden_units'],
-                   dropout=0.1)
-        model.to(device)
-        model.load_state_dict(torch.load(model_path))
-        model = torch.nn.parallel.DataParallel(model)
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Total parameters: {total_params}")
-    if not os.path.exists(path_dir):
-        os.makedirs(path_dir)
-    with open(os.path.join(path_dir, "model_params.txt"), "w") as f:
-        f.write(f"Total parameters: {total_params}\n")
-    model.eval()
-    return model
+start_time = time.time()
+run(config)
+end_time = time.time()
+print(f"Total training time: {end_time - start_time} seconds")
 
 test_dataset = CustomTargetDataset(test_df, smiles_vocab, properties_list=config['properties'])
 test_loader = DataLoader(test_dataset, batch_size=256, shuffle=True)
