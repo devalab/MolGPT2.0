@@ -40,7 +40,7 @@ parser.add_argument('--properties', nargs='+', required=True,
 parser.add_argument('--checkpoint_dir', type=str, default=None, help='Directory to save checkpoints and logs')
 parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
 parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training')
-parser.add_argument('--d_model', type=int, default=256, help='Transformer model dimension')
+parser.add_argument('--d_model', type=int, default=256, help='Token embedding dimension')
 parser.add_argument('--n_heads', type=int, default=8, help='Number of attention heads')
 parser.add_argument('--n_layers', type=int, default=8, help='Number of transformer layers')
 parser.add_argument('--hidden_units', type=int, default=1024, help='Number of hidden units in feedforward layers')
