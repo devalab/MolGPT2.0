@@ -68,7 +68,7 @@ config = {
 if args.checkpoint_dir is not None:
     config['run_name'] = args.checkpoint_dir
 else:
-    config['run_name'] = "encoder_decoder"+ "_".join(prop for prop in config['properties'])
+    config['run_name'] = "encoder_decoder_"+ "_".join(prop for prop in config['properties'])
 
 df = pd.read_csv('../data/lck_dockstring_data1.csv')
 print(df.head())
@@ -111,36 +111,6 @@ import sys
 sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
 import sascorer
 from rdkit.Chem import QED, Descriptors, Crippen
-def calc_properties(properties, smiles):
-    qeds = []
-    logps = []
-    tpsas = []
-    sas = []
-    molwt = []
-    props = []
-    valid_smi = []
-    for prop,smi in zip(properties,smiles):
-        mol = Chem.MolFromSmiles(smi)
-        try:
-            if mol is not None:
-                qed = QED.qed(mol)
-                logp = Crippen.MolLogP(mol)
-                tpsa = Descriptors.TPSA(mol)
-                sa = sascorer.calculateScore(mol)
-                mw = Descriptors.MolWt(mol)
-                
-                qeds.append(qed)
-                logps.append(logp)
-                tpsas.append(tpsa)
-                sas.append(sa)
-                molwt.append(mw)
-                props.append(prop)    
-                valid_smi.append(smi)            
-        except:
-            pass
-                
-    return qeds, logps, tpsas, sas, molwt, np.array(props), valid_smi
-
 print(config)
 
 model = load_model(config,model_file_name='best_model.pt')

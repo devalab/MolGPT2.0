@@ -29,45 +29,10 @@ import sklearn
 import wandb
 from sklearn.preprocessing import MinMaxScaler
 from rdkit import DataStructs
-print("Loaded libraries.")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"device : {device}")
-
-parser = argparse.ArgumentParser(description='Train model')
-parser.add_argument('--properties', nargs='+', required=True, 
-                    help='Properties to use (e.g., --properties affinity logps)')
-parser.add_argument('--checkpoint_dir', type=str, default=None, help='Directory to save checkpoints and logs')
-parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
-parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training')
-parser.add_argument('--d_model', type=int, default=256, help='Token embedding dimension')
-parser.add_argument('--n_heads', type=int, default=8, help='Number of attention heads')
-parser.add_argument('--n_layers', type=int, default=8, help='Number of transformer layers')
-parser.add_argument('--hidden_units', type=int, default=1024, help='Number of hidden units in feedforward layers')
-parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
-parser.add_argument('--temp', type=float, default=1.0, help='Sampling temperature')
-args = parser.parse_args()
-print("Properties to use: ", args.properties)
-
-config = {
-    'batch_size' : args.batch_size,
-    'd_model': args.d_model,
-    'n_heads': args.n_heads,
-    'n_layers': args.n_layers,
-    'hidden_units': args.hidden_units,
-    'lr': args.lr,
-    'epochs': args.epochs,
-    'properties': sorted(args.properties)
-}
-if args.checkpoint_dir is not None:
-    config['run_name'] = args.checkpoint_dir
-else:
-    config['run_name'] = "encoder_decoder"+ "_".join(prop for prop in config['properties'])
-
-
 
 df = pd.read_csv('../data/lck_dockstring_data1.csv')
-print(df.head())
 
 affinity_scaler = MinMaxScaler()
 qed_scaler = MinMaxScaler()
@@ -85,11 +50,6 @@ with open('../data/train_df_with_sas.pkl', 'rb') as f:
     train_df = pickle.load(f)
 with open('../data/test_df_with_sas.pkl', 'rb') as f:
     test_df = pickle.load(f)
-
-print("Train Dataframe : ")
-print(train_df.head())
-print("Test Dataframe : ")
-print(test_df.head())
 
 SMI_MAX_SIZE = 300
 SMI_MIN_FREQ=1
@@ -151,11 +111,7 @@ class PropertyEncoder(nn.Module):
         self.layers = nn.ModuleList([nn.Linear(1, d_model) for _ in range(n_properties)])
         self.layer_final = nn.ModuleList([nn.Linear(d_model, d_model) for _ in range(n_properties)])
     def forward(self, x):
-        outs = [self.layer_final[i](F.relu(self.layers[i](x[:,i].unsqueeze(1)))) for i, layer in enumerate(self.layers)]
-        # for i, layer in enumerate(self.layers):
-        #     out = self.layers[i](x[:,i])
-        #     out = F.relu(out)
-        #     x = self.layer_final[i](out)        
+        outs = [self.layer_final[i](F.relu(self.layers[i](x[:,i].unsqueeze(1)))) for i, layer in enumerate(self.layers)]       
         return torch.stack(outs, dim=1)
 
 # Causal mask for masked attention
@@ -515,7 +471,6 @@ def run(config):
             best_val_loss = val_loss
             with open(os.path.join(path_dir, 'best_val_loss.txt'), 'w') as f:
                 f.write(str(best_val_loss))
-            # torch.save(model.state_dict(), os.path.join(path_dir, 'best_model.pt'))
             save_model(model, config, model_file_name='best_model.pt')
             with open(os.path.join(path_dir, 'best_epoch.txt'), 'w') as f:
                 f.write(str(i+1))
@@ -580,6 +535,39 @@ def run(config):
     plt.close()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Train model')
+    parser.add_argument('--properties', nargs='+', required=True, 
+                        help='Properties to use (e.g., --properties affinity logps)')
+    parser.add_argument('--checkpoint_dir', type=str, default=None, help='Directory to save checkpoints and logs')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training')
+    parser.add_argument('--d_model', type=int, default=256, help='Transformer model dimension')
+    parser.add_argument('--n_heads', type=int, default=8, help='Number of attention heads')
+    parser.add_argument('--n_layers', type=int, default=8, help='Number of transformer layers')
+    parser.add_argument('--hidden_units', type=int, default=1024, help='Number of hidden units in feedforward layers')
+    parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
+    parser.add_argument('--temp', type=float, default=1.0, help='Sampling temperature')
+    args = parser.parse_args()
+    print("Properties to use: ", args.properties)
+
+    config = {
+        'batch_size' : args.batch_size,
+        'd_model': args.d_model,
+        'n_heads': args.n_heads,
+        'n_layers': args.n_layers,
+        'hidden_units': args.hidden_units,
+        'lr': args.lr,
+        'epochs': args.epochs,
+        'properties': sorted(args.properties)
+    }
+    if args.checkpoint_dir is not None:
+        config['run_name'] = args.checkpoint_dir
+    else:
+        config['run_name'] = "encoder_decoder_"+ "_".join(prop for prop in config['properties'])
+    print(f"device : {device}")
+    print(df.head())
+    print(f"Train Dataframe Size : {len(train_df)}")
+    print(f"Test Dataframe Size : {len(test_df)}")
     start_time = time.time()
     run(config)
     end_time = time.time()
